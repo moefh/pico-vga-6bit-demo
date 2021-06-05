@@ -41,11 +41,20 @@ be OK) in series.
 
 <img src="photos/board.jpg" width="640" alt="Pico board and VGA Connector" title="Pico board and VGA Connector">
 
-The schematic I'm using (shown in the picture above) is this, with
-resistors R1=560Ω and R2=1KΩ.
+The schematic I'm using (shown in the picture above) for each color is
+this, with resistors R1=560Ω and R2=1KΩ.
 
 ![DAC schematic](photos/dac-schematic.png)
 
+The output pins used in the Pico (configured in `main.c`) are:
+
+- pins 2, 3: red (pin 2 is the least significant bit)
+- pins 4, 5: green (pin 4 is the least significant bit)
+- pins 6, 7: blue (pin 6 is the least significant bit)
+- pin 8: horizontal sync
+- pin 9: vertical sync
+
+Don't forget to connect the Pico's ground to the VGA cable ground.
 
 Possible problems:
 

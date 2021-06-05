@@ -166,9 +166,9 @@ int main(void)
 
   //sleep_ms(5000); printf("Starting...\n");
 
-  bi_decl_if_func_used(bi_pin_mask_with_name(3 << (VGA_PIN_BASE + 0), "Blue 0-1"));
+  bi_decl_if_func_used(bi_pin_mask_with_name(3 << (VGA_PIN_BASE + 0), "Red 0-1"));
   bi_decl_if_func_used(bi_pin_mask_with_name(3 << (VGA_PIN_BASE + 2), "Green 0-1"));
-  bi_decl_if_func_used(bi_pin_mask_with_name(3 << (VGA_PIN_BASE + 4), "Red 0-1"));
+  bi_decl_if_func_used(bi_pin_mask_with_name(3 << (VGA_PIN_BASE + 4), "Blue 0-1"));
   bi_decl_if_func_used(bi_1pin_with_name(VGA_PIN_BASE + 6, "H-Sync"));
   bi_decl_if_func_used(bi_1pin_with_name(VGA_PIN_BASE + 7, "V-Sync"));
   
