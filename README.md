@@ -44,7 +44,7 @@ be OK) in series.
 The schematic I'm using (shown in the picture above) is this, with
 resistors R1=560Ω and R2=1KΩ.
 
-![DAC schematic](photos/dac-schematic.jpg)
+![DAC schematic](photos/dac-schematic.png)
 
 
 Possible problems:
