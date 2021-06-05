@@ -42,7 +42,8 @@ be OK) in series.
 <img src="photos/board.jpg" width="640" alt="Pico board and VGA Connector" title="Pico board and VGA Connector">
 
 The schematic I'm using (shown in the picture above) for each color is
-this, with resistors R1=560Ω and R2=1KΩ.
+this, with resistors R1=560Ω on the most significant bit pin and
+R2=1KΩ on the least significant bit pin.
 
 ![DAC schematic](photos/dac-schematic.png)
 
