@@ -141,22 +141,6 @@ static void move_character(struct CHARACTER *ch)
   ch->sprite = &char_frames[frame_num + ((ch->dx < 0) ? loserboy_mirror_frame_start : 0)];
 }
 
-static void fancy_draw_text(int x, int y, unsigned int text_color, unsigned int border_color, const char *text)
-{
-  font_set_color(border_color);
-  for (int dx = -1; dx <= 1; dx++) {
-    for (int dy = -1; dy <= 1; dy++) {
-      if (dx != 0 || dy != 0) {
-        font_move(x+dx, y+dy);
-        font_draw_text(text);
-      }
-    }
-  }
-  font_set_color(text_color);
-  font_move(x, y);
-  font_draw_text(text);
-}
-
 int main(void)
 {
   stdio_init_all();
@@ -179,6 +163,7 @@ int main(void)
   }
 
   font_set_font(&font6x8);
+  font_set_color(0x3f);
   init_sprites();
 
   while (true) {
@@ -199,7 +184,9 @@ int main(void)
           ch->message_index = -1;  // cancel message if already drawing one
         } else {
           font_align(FONT_ALIGN_CENTER);
-          fancy_draw_text(ch->x + ch->sprite->width/2, ch->y - 10, 0x3f, 0, loserboy_messages[ch->message_index]);
+          font_move(ch->x + ch->sprite->width/2, ch->y - 10);
+          font_set_border(1, 0x00);
+          font_print(loserboy_messages[ch->message_index]);
           has_message = true;
         }
       }
@@ -209,7 +196,7 @@ int main(void)
     int fps = count_fps();
     font_align(FONT_ALIGN_LEFT);
     font_move(10, 10);
-    font_set_color(0x3f);
+    font_set_border(0, 0x00);
     font_printf("%d fps", fps);
 
     // send prepared framebuffer to monitor and get a new one

@@ -8,6 +8,7 @@ static const struct VGA_FONT *font;
 static unsigned int font_x, font_y;
 static enum FONT_ALIGNMENT font_alignment;
 static unsigned char font_color;
+static unsigned char border[2];
 
 #if VGA_FONT_USE_STDARG
 #include <stdarg.h>
@@ -19,7 +20,7 @@ void font_printf(const char *fmt, ...)
   vsnprintf(print_buf, sizeof(print_buf), fmt, ap);
   va_end(ap);
 
-  font_draw_text(print_buf);
+  font_print(print_buf);
 }
 #endif
 
@@ -33,6 +34,12 @@ void font_set_color(unsigned int color)
   font_color = vga_screen.sync_bits | (color & 0x3f);
 }
 
+void font_set_border(int enable, unsigned int color)
+{
+  border[0] = enable;
+  border[1] = vga_screen.sync_bits | (color & 0x3f);
+}
+
 void font_move(unsigned int x, unsigned int y)
 {
   font_x = x;
@@ -44,35 +51,26 @@ void font_align(enum FONT_ALIGNMENT alignment)
   font_alignment = alignment;
 }
 
-void font_draw_int(int num)
+void font_print_int(int num)
 {
   snprintf(print_buf, sizeof(print_buf), "%d", num);
-  font_draw_text(print_buf);
+  font_print(print_buf);
 }
 
-void font_draw_uint(unsigned int num)
+void font_print_uint(unsigned int num)
 {
   snprintf(print_buf, sizeof(print_buf), "%u", num);
-  font_draw_text(print_buf);
+  font_print(print_buf);
 }
 
-void font_draw_float(float num)
+void font_print_float(float num)
 {
   snprintf(print_buf, sizeof(print_buf), "%f", num);
-  font_draw_text(print_buf);
+  font_print(print_buf);
 }
 
-void font_draw_text(const char *text)
+static int render_text(const char *text, int x, int y, unsigned int color)
 {
-  if (text == NULL) return;
-  
-  switch (font_alignment) {
-  case FONT_ALIGN_LEFT:   /* nothing to do */ break;
-  case FONT_ALIGN_CENTER: font_x -= strlen(text) * font->w / 2; break;
-  case FONT_ALIGN_RIGHT:  font_x -= strlen(text) * font->w; break;
-  }
-  
-  int save_font_x = font_x;
   while (*text != '\0') {
     char ch = *text++;
     if (ch >= font->first_char && ch < font->first_char+font->num_chars) {
@@ -81,17 +79,43 @@ void font_draw_text(const char *text)
         uint8_t char_line = font->data[font->h*ch + i];
         uint8_t char_bit = 1;
         for (int j = 0; j < font->w; j++) {
-          if ((char_line & char_bit) != 0 && font_y+i < vga_screen.height && font_x+j < vga_screen.width) {
-            ((unsigned char *) vga_screen.framebuffer[font_y+i])[font_x+j] = font_color;
+          if ((char_line & char_bit) != 0 &&
+              y+i >= 0 &&
+              x+j >= 0 &&
+              y+i < vga_screen.height &&
+              x+j < vga_screen.width) {
+            ((unsigned char *) vga_screen.framebuffer[y+i])[x+j] = color;
           }
           char_bit <<= 1;
         }
       }
     }
-    font_x += font->w;
+    x += font->w;
   }
 
-  if (font_alignment == FONT_ALIGN_RIGHT) {
-    font_x = save_font_x;
+  return x;
+}
+
+void font_print(const char *text)
+{
+  if (text == NULL) return;
+  
+  switch (font_alignment) {
+  case FONT_ALIGN_LEFT:   /* nothing to do */ break;
+  case FONT_ALIGN_CENTER: font_x -= strlen(text) * font->w / 2; break;
+  case FONT_ALIGN_RIGHT:  font_x -= strlen(text) * font->w; break;
+  }
+
+  if (border[0]) {
+    for (int i = -1; i <= 1; i++) {
+      for (int j = -1; j <= 1; j++) {
+        if (i == 0 && j == 0) continue;
+        render_text(text, font_x+i, font_y+j, border[1]);
+      }
+    }
+  }
+  int new_x = render_text(text, font_x, font_y, font_color);
+  if (font_alignment != FONT_ALIGN_RIGHT) {
+    font_x = new_x;
   }
 }
