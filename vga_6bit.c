@@ -75,10 +75,13 @@ static unsigned int *framebuffers[2];
 static unsigned int *framebuffer_lines[2][SCREEN_HEIGHT];
 
 struct DMA_BUFFER_INFO {
-  uint32_t count;
-  void *data;
+  uintptr_t read_addr;
+  uintptr_t write_addr;
+  uint32_t  transfer_count;
+  uint32_t  ctrl_trig;
 };
 static struct DMA_BUFFER_INFO dma_chain[2*V_FULL_FRAME+1];
+static void *dma_restart_buffer[1];
 static uint dma_control_chan;
 static uint dma_data_chan;
 
@@ -89,49 +92,26 @@ struct VGA_SCREEN vga_screen;
 static void __isr __time_critical_func(dma_handler)(void)
 {
   dma_hw->ints0 = 1u << dma_data_chan;
-  dma_channel_set_read_addr(dma_control_chan, &dma_chain[0], true);
   frame_count++;
 }
 
-static void init_dma_irq(void)
+static void set_dma_buffer_src(struct DMA_BUFFER_INFO *buf, volatile void *src, uint32_t count)
 {
-  irq_set_exclusive_handler(DMA_IRQ_0, dma_handler);
-  irq_set_priority(DMA_IRQ_0, 0xff);
-  irq_set_enabled(DMA_IRQ_0, true);
+  buf->read_addr = (uintptr_t) src;
+  buf->transfer_count = count;
 }
 
-#if VGA_ENABLE_MULTICORE
-
-#include "pico/multicore.h"
-
-#define MARK_CORE1_STARTED     0x12345678
-#define MARK_CORE0_CONTINUING  0x87654321
-
-void (*volatile vga_core1_func)(void) = NULL;
-
-static void core1_main(void)
+static void set_dma_buffer_dst(struct DMA_BUFFER_INFO *buf, volatile void *dest, uint32_t ctrl)
 {
-  multicore_fifo_push_blocking(MARK_CORE1_STARTED);
-  
-  uint32_t mark = multicore_fifo_pop_blocking();
-  if (mark == MARK_CORE0_CONTINUING) {
-    init_dma_irq();
-  } else {
-    printf("VGA MULTICORE ERROR: received invalid mark in core1: 0x%08x\n", (unsigned int) mark);
-  }
-
-  while (true) {
-    if (vga_core1_func) {
-      vga_core1_func();
-    }
-  }
+  buf->write_addr = (uintptr_t) dest;
+  buf->ctrl_trig = ctrl;
 }
-#endif /* VGA_ENABLE_MULTICORE */
 
 static int init_pio(unsigned int pin_out_base)
 {
   PIO pio = pio0;
   uint sm = pio_claim_unused_sm(pio, true);
+  uint pio_dreq = pio_get_dreq(pio, sm, true);
 
   // TODO: choose PIO clock divider based on the CPU clock and VGA
   // pixel clock.  We're currently assuming that the CPU clock is
@@ -145,59 +125,51 @@ static int init_pio(unsigned int pin_out_base)
 
   dma_control_chan = dma_claim_unused_channel(true);
   dma_data_chan    = dma_claim_unused_channel(true);
-  dma_channel_config cfg;
 
-  // DMA control channel
-  cfg = dma_channel_get_default_config(dma_control_chan);
+  // DMA control channel config
+  dma_channel_config cfg = dma_channel_get_default_config(dma_control_chan);
   channel_config_set_transfer_data_size(&cfg, DMA_SIZE_32);
   channel_config_set_read_increment(&cfg, true);
   channel_config_set_write_increment(&cfg, true);
-  channel_config_set_ring(&cfg, true, 3);    // loop write address every 1<<3 = 8 bytes
+  channel_config_set_ring(&cfg, true, 4);    // loop write address every 1<<4 = 16 bytes
   
   dma_channel_configure(dma_control_chan,
                         &cfg,
-                        &dma_hw->ch[dma_data_chan].al3_transfer_count,   // dest (we'll write to transfer_count and read_address)
-                        &dma_chain[0],                                   // source (updated in irq)
-                        sizeof(struct DMA_BUFFER_INFO)/sizeof(int32_t),  // num words for each transfer
-                        false                                            // don't start now
+                        &dma_hw->ch[dma_data_chan].read_addr,     // dest (update data channel and trigger it)
+                        &dma_chain[0],                            // source
+                        4,                                        // num words for each transfer
+                        false                                     // don't start now
                         );
 
-  // DMA data channel
-  cfg = dma_channel_get_default_config(dma_data_chan);
-  channel_config_set_transfer_data_size(&cfg, DMA_SIZE_32);
-  channel_config_set_read_increment(&cfg, true);
-  channel_config_set_write_increment(&cfg, false);
-  channel_config_set_dreq(&cfg, pio_get_dreq(pio, sm, true));
-  channel_config_set_chain_to(&cfg, dma_control_chan);
-  channel_config_set_irq_quiet(&cfg, true);  // raise irq when 0 is written to trigger register (end of chain)
+  // all blocks of dma_chain except last are set to trigger dma_data_chan to copy data to PIO
+  for (int i = 0; i < count_of(dma_chain)-1; i++) {
+    // src will be set by init_buffers() and vga_swap_buffers()
+    set_dma_buffer_dst(&dma_chain[i],
+                       &pio->txf[sm],                                              // write to PIO
+                       DMA_CH0_CTRL_TRIG_INCR_READ_BITS                         |  // increment read ptr
+                       (pio_dreq            << DMA_CH0_CTRL_TRIG_TREQ_SEL_LSB)  |  // as fast as PIO requires
+                       (dma_control_chan    << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB)  |  // chain to dma_control_chan
+                       (((uint)DMA_SIZE_32) << DMA_CH0_CTRL_TRIG_DATA_SIZE_LSB) |  // copy 32 bits per count
+                       DMA_CH0_CTRL_TRIG_IRQ_QUIET_BITS                         |  // suppress IRQ
+                       DMA_CH0_CTRL_TRIG_EN_BITS);
+  }
 
-  dma_channel_configure(dma_data_chan,
-                        &cfg,
-                        &pio->txf[sm],   // dest
-                        NULL,            // source    (set by control channel)
-                        0,               // num words (set by control channel)
-                        false            // don't start now
-                        );
+  // last block of dma_chain is set to trigger dma_data_chan to copy the dma_chain start address to the control chain (restarting it)
+  set_dma_buffer_src(&dma_chain[count_of(dma_chain)-1], dma_restart_buffer, 1);
+  set_dma_buffer_dst(&dma_chain[count_of(dma_chain)-1],
+                     &dma_hw->ch[dma_control_chan].al3_read_addr_trig,           // write to dma_control_chan read address trigger
+                     (DREQ_FORCE          << DMA_CH0_CTRL_TRIG_TREQ_SEL_LSB)  |  // as fast as possible
+                     (dma_data_chan       << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB)  |  // chain to itself (don't chain)
+                     (((uint)DMA_SIZE_32) << DMA_CH0_CTRL_TRIG_DATA_SIZE_LSB) |  // copy 32 bits per count
+                     0                                                        |  // trigger IRQ
+                     DMA_CH0_CTRL_TRIG_EN_BITS);
 
   dma_channel_set_irq0_enabled(dma_data_chan, true);
+  irq_set_exclusive_handler(DMA_IRQ_0, dma_handler);
+  irq_set_priority(DMA_IRQ_0, 0xff);
+  irq_set_enabled(DMA_IRQ_0, true);
 
-#if VGA_ENABLE_MULTICORE
-  multicore_launch_core1(core1_main);
-  uint32_t mark = multicore_fifo_pop_blocking();
-  if (mark != MARK_CORE1_STARTED) {
-    return VGA_ERROR_MULTICORE;
-  }
-  multicore_fifo_push_blocking(MARK_CORE0_CONTINUING);
-#else
-  init_dma_irq();
-#endif
   return 0;
-}
-
-static void set_dma_buffer_info(struct DMA_BUFFER_INFO *buf, void *data, uint32_t count)
-{
-  buf->data = data;
-  buf->count = count;
 }
 
 static void clear_framebuffer(uint fb_num, uint8_t color)
@@ -249,20 +221,21 @@ static int init_buffers(int num_framebuffers)
   for (int i = 0; i < V_FULL_FRAME; i++) {
     if (i < V_SYNC_PULSE) {
       // vblank with vsync active
-      set_dma_buffer_info(buf++, hblank_buffer_vsync_on,  HBLANK_BUFFER_LEN);
-      set_dma_buffer_info(buf++, hpixels_buffer_vsync_on, HPIXELS_BUFFER_LEN);
+      set_dma_buffer_src(buf++, hblank_buffer_vsync_on,  HBLANK_BUFFER_LEN);
+      set_dma_buffer_src(buf++, hpixels_buffer_vsync_on, HPIXELS_BUFFER_LEN);
     } else if (i < V_SYNC_PULSE+V_BACK_PORCH || i >= V_SYNC_PULSE+V_BACK_PORCH+V_PIXELS) {
       // vblank with vsync inactive
-      set_dma_buffer_info(buf++, hblank_buffer_vsync_off,  HBLANK_BUFFER_LEN);
-      set_dma_buffer_info(buf++, hpixels_buffer_vsync_off, HPIXELS_BUFFER_LEN);
+      set_dma_buffer_src(buf++, hblank_buffer_vsync_off,  HBLANK_BUFFER_LEN);
+      set_dma_buffer_src(buf++, hpixels_buffer_vsync_off, HPIXELS_BUFFER_LEN);
     } else {
       // pixel data
-      set_dma_buffer_info(buf++, hblank_buffer_vsync_off, HBLANK_BUFFER_LEN);
-      set_dma_buffer_info(buf++, framebuffer_lines[0][(i-V_SYNC_PULSE-V_BACK_PORCH)/V_DIV], HPIXELS_BUFFER_LEN);
+      set_dma_buffer_src(buf++, hblank_buffer_vsync_off, HBLANK_BUFFER_LEN);
+      set_dma_buffer_src(buf++, framebuffer_lines[0][(i-V_SYNC_PULSE-V_BACK_PORCH)/V_DIV], HPIXELS_BUFFER_LEN);
     }
   }
-  // chain terminator
-  set_dma_buffer_info(buf, NULL, 0);
+
+  // setup DMA restart buffer
+  dma_restart_buffer[0] = &dma_chain[0];
 
   return 0;
 }
@@ -281,10 +254,15 @@ void vga_swap_buffers(bool wait_sync)
   // inject new framebuffer in DMA chain
   for (int i = 0; i < V_PIXELS; i++) {
     struct DMA_BUFFER_INFO *buf = &dma_chain[2*(V_SYNC_PULSE+V_BACK_PORCH+i) + 1];
-    set_dma_buffer_info(buf, framebuffer_lines[cur_framebuffer][i/V_DIV], HPIXELS_BUFFER_LEN);
+    set_dma_buffer_src(buf, framebuffer_lines[cur_framebuffer][i/V_DIV], HPIXELS_BUFFER_LEN);
   }
   cur_framebuffer = !cur_framebuffer;
   vga_screen.framebuffer = framebuffer_lines[cur_framebuffer];
+}
+
+void vga_clear_screen(unsigned char color)
+{
+  clear_framebuffer(cur_framebuffer, color);
 }
 
 int vga_init(unsigned int pin_out_base)

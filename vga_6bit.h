@@ -3,8 +3,6 @@
 
 #include <stdbool.h>
 
-#define VGA_ENABLE_MULTICORE  1  // 1=run DMA IRQ in core 1
-
 #define VGA_ERROR_ALLOC     (-1)
 #define VGA_ERROR_MULTICORE (-2)
 

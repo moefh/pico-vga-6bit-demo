@@ -14,11 +14,11 @@
 #include "vga_draw.h"
 
 #include "data/font6x8.h"
-#include "data/background.h"
 #include "data/loserboy.h"
+#include "data/tiles.h"
 
 #define VGA_PIN_BASE  2  // first VGA output pin
-#define NUM_SPRITES   8  // number of sprites to draw
+#define NUM_SPRITES   30 // number of sprites to draw
 
 struct CHARACTER {
   struct SPRITE *sprite;
@@ -31,7 +31,7 @@ struct CHARACTER {
   int message_frame;
 };
 
-struct SPRITE background;
+struct SPRITE bg_tiles[img_tiles_num_spr];
 struct SPRITE char_frames[img_loserboy_num_spr];
 struct CHARACTER characters[NUM_SPRITES];
 
@@ -40,6 +40,12 @@ struct CHARACTER characters[NUM_SPRITES];
 #define loserboy_walk_frame_delay   4
 static const unsigned int loserboy_walk_cycle[] = {
   5, 6, 7, 8, 9, 8, 7, 6, 5, 0, 1, 2, 3, 4, 3, 2, 1, 0,
+};
+static const unsigned char bg_map[20] = {
+  0,0,0,0,0,
+  0,0,1,0,0,
+  0,1,0,1,0,
+  0,0,0,0,0,
 };
 
 static const char *loserboy_messages[] = {
@@ -90,11 +96,14 @@ static int count_fps(void)
 
 static void init_sprites(void)
 {
-  background.width  = img_background_width;
-  background.height = img_background_height;
-  background.stride = img_background_stride;
-  background.data   = img_background_data;
-  
+  for (int i = 0; i < count_of(bg_tiles); i++) {
+    struct SPRITE *spr = &bg_tiles[i];
+    spr->width  = img_tiles_width;
+    spr->height = img_tiles_height;
+    spr->stride = img_tiles_stride;
+    spr->data   = &img_tiles_data[i*img_tiles_stride*img_tiles_height];
+  }
+
   for (int i = 0; i < count_of(char_frames); i++) {
     struct SPRITE *spr = &char_frames[i];
     spr->width  = img_loserboy_width;
@@ -112,20 +121,12 @@ static void init_sprites(void)
     ch->frame = i + i*loserboy_walk_frame_delay;
     ch->sprite = NULL;
     ch->message_index = -1;
-    ch->message_frame = 120 + 300 * i + rand() % 1200;
+    ch->message_frame = -1;
   }
 }
 
 static void move_character(struct CHARACTER *ch)
 {
-  ch->x += ch->dx;
-  if (ch->x <  -ch->sprite->width/2)                   ch->dx =   1 + rand() % 3;
-  if (ch->x >= vga_screen.width-ch->sprite->width/2)   ch->dx = -(1 + rand() % 3);
-
-  ch->y += ch->dy;
-  if (ch->y <  -ch->sprite->height/2)                  ch->dy =   1 + rand() % 2;
-  if (ch->y >= vga_screen.height-ch->sprite->height/2) ch->dy = -(1 + rand() % 2);
-
   if (ch->message_frame-- < 0) {
     ch->message_index = -1;
     ch->message_frame = 600 + rand() % 1200;
@@ -133,12 +134,24 @@ static void move_character(struct CHARACTER *ch)
     ch->message_index = rand() % count_of(loserboy_messages);
   }
 
-  ch->frame++;
-  if (ch->frame/loserboy_walk_frame_delay >= count_of(loserboy_walk_cycle)) {
-    ch->frame = 0;
+  if (ch->message_frame > 1500) {
+    ch->sprite = &char_frames[loserboy_stand_frame + ((ch->dx < 0) ? loserboy_mirror_frame_start : 0)];
+  } else {
+    ch->x += ch->dx;
+    if (ch->x <  -ch->sprite->width/2)                   ch->dx =   1 + rand() % 3;
+    if (ch->x >= vga_screen.width-ch->sprite->width/2)   ch->dx = -(1 + rand() % 3);
+    
+    ch->y += ch->dy;
+    if (ch->y <  -ch->sprite->height/2)                  ch->dy =   1 + rand() % 2;
+    if (ch->y >= vga_screen.height-ch->sprite->height/2) ch->dy = -(1 + rand() % 2);
+    
+    ch->frame++;
+    if (ch->frame/loserboy_walk_frame_delay >= count_of(loserboy_walk_cycle)) {
+      ch->frame = 0;
+    }
+    int frame_num = loserboy_walk_cycle[ch->frame/loserboy_walk_frame_delay];
+    ch->sprite = &char_frames[frame_num + ((ch->dx < 0) ? loserboy_mirror_frame_start : 0)];
   }
-  int frame_num = loserboy_walk_cycle[ch->frame/loserboy_walk_frame_delay];
-  ch->sprite = &char_frames[frame_num + ((ch->dx < 0) ? loserboy_mirror_frame_start : 0)];
 }
 
 int main(void)
@@ -173,30 +186,38 @@ int main(void)
       move_character(&characters[i]);
     }
 
+    // draw background
+    vga_clear_screen(0x18);
+    for (int ty = 0; ty < 4; ty++) {
+      for (int tx = 0; tx < 5; tx++) {
+        struct SPRITE *tile = &bg_tiles[bg_map[ty*5 + tx]];
+        draw_sprite(tile, tx*tile->width, ty*tile->height, false);
+      }
+    }
+    
     // draw sprites
-    draw_sprite(&background, 0, 0, false);
-    bool has_message = false;
+    int msg_index = -1;
+    int msg_x, msg_y;
     for (int i = 0; i < NUM_SPRITES; i++) {
       struct CHARACTER *ch = &characters[i];
       draw_sprite(ch->sprite, ch->x, ch->y, true);
       if (ch->message_index >= 0) {
-        if (has_message) {
-          ch->message_index = -1;  // cancel message if already drawing one
-        } else {
-          font_align(FONT_ALIGN_CENTER);
-          font_move(ch->x + ch->sprite->width/2, ch->y - 10);
-          font_set_border(1, 0x00);
-          font_print(loserboy_messages[ch->message_index]);
-          has_message = true;
-        }
+        msg_x = ch->x + ch->sprite->width/2;
+        msg_y = ch->y - 10;
+        msg_index = ch->message_index;
       }
     }
+    if (msg_index >= 0) {
+      font_align(FONT_ALIGN_CENTER);
+      font_move(msg_x, msg_y);
+      font_print(loserboy_messages[msg_index]);
+    }
 
+    
     // draw fps counter
     int fps = count_fps();
     font_align(FONT_ALIGN_LEFT);
     font_move(10, 10);
-    font_set_border(0, 0x00);
     font_printf("%d fps", fps);
 
     // send prepared framebuffer to monitor and get a new one
