@@ -1,8 +1,9 @@
 # pico-vga-6bit-demo
 
-This is a simple demo of VGA output with the Raspberry Pi Pico:
+This is a simple demo of VGA output with the Raspberry Pi Pico
+(click to open an animated gif):
 
-<a href="photos/video.webm">
+<a href="photos/video.gif">
 <img src="photos/screen.jpg" width="640" alt="Demo Screen with glorious 64 colors" title="Demo Screen with glorious 64 colors">
 </a>
 
