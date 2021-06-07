@@ -2,7 +2,9 @@
 
 This is a simple demo of VGA output with the Raspberry Pi Pico:
 
+<a href="photos/video.webm">
 <img src="photos/screen.jpg" width="640" alt="Demo Screen with glorious 64 colors" title="Demo Screen with glorious 64 colors">
+</a>
 
 The [official
 repositories](https://github.com/raspberrypi/pico-playground) include
@@ -56,15 +58,3 @@ The output pins used in the Pico (configured in `main.c`) are:
 - pin 9: vertical sync
 
 Don't forget to connect the Pico's ground to the VGA cable ground.
-
-Possible problems:
-
-- I don't have a good solution for running a DMA chain cycle with no
-  CPU support, so the code could mess the signal timing when the CPU
-  gets too busy. The code tries to work around that problem by running
-  the interrupt request handler that restarts the DMA chain on the
-  second core, but that only works if the second core never gets too
-  busy (which is the case in this demo, since everything else on it
-  runs in the first core).
-
-
