@@ -39,19 +39,26 @@
 #include "vga_6bit.h"
 #include "vga_6bit.pio.h"
 
-// VGA MODE
-#define PIX_CLOCK_KHZ 12588
-#define H_FRONT_PORCH 8
-#define H_SYNC_PULSE  48
-#define H_BACK_PORCH  24
-#define H_PIXELS      320
-#define V_FRONT_PORCH 10
-#define V_SYNC_PULSE  2
-#define V_BACK_PORCH  33
-#define V_PIXELS      480
-#define V_DIV         2
-#define H_POLARITY    1  // polarity of sync pulse (0=positive, 1=negative)
-#define V_POLARITY    1
+//                                         clock     hf  hp  hb  hpix    vf  vb  vb  vpix  vdiv  (h,v)pol
+const struct VGA_MODE vga_mode_320x240 = { 12587500,  8, 48, 24, 320,    10,  2, 33, 480,     2,  1,1  };
+const struct VGA_MODE vga_mode_320x200 = { 12587500,  8, 48, 24, 320,    50,  2, 73, 400,     2,  1,1  };
+//const struct VGA_MODE vga_mode_320x200={ 12587500,  8, 48, 24, 320,    12,  2, 35, 400,     2,  1,0  };
+//const struct VGA_MODE vga_mode_320x175={ 12587500,  8, 48, 24, 320,    37,  2, 60, 350,     2,  0,1  };
+
+const static struct VGA_MODE *vga_mode = NULL;
+
+#define PIX_CLOCK_MHZ (vga_mode->pixel_clock_mhz)
+#define H_FRONT_PORCH (vga_mode->h_front_porch)
+#define H_SYNC_PULSE  (vga_mode->h_sync_pulse)
+#define H_BACK_PORCH  (vga_mode->h_back_porch)
+#define H_PIXELS      (vga_mode->h_pixels)
+#define V_FRONT_PORCH (vga_mode->v_front_porch)
+#define V_SYNC_PULSE  (vga_mode->v_sync_pulse)
+#define V_BACK_PORCH  (vga_mode->v_back_porch)
+#define V_PIXELS      (vga_mode->v_pixels)
+#define V_DIV         (vga_mode->v_div)
+#define H_POLARITY    (vga_mode->h_polarity)
+#define V_POLARITY    (vga_mode->v_polarity)
 
 #define H_FULL_LINE   (H_FRONT_PORCH+H_SYNC_PULSE+H_BACK_PORCH+H_PIXELS)
 #define V_FULL_FRAME  (V_FRONT_PORCH+V_SYNC_PULSE+V_BACK_PORCH+V_PIXELS)
@@ -67,12 +74,12 @@
 #define SCREEN_WIDTH  H_PIXELS
 #define SCREEN_HEIGHT (V_PIXELS/V_DIV)
 
-static unsigned int hblank_buffer_vsync_on[HBLANK_BUFFER_LEN];
-static unsigned int hblank_buffer_vsync_off[HBLANK_BUFFER_LEN];
-static unsigned int hpixels_buffer_vsync_on[HPIXELS_BUFFER_LEN];
-static unsigned int hpixels_buffer_vsync_off[HPIXELS_BUFFER_LEN];
+static unsigned int *hblank_buffer_vsync_on;
+static unsigned int *hblank_buffer_vsync_off;
+static unsigned int *hpixels_buffer_vsync_on;
+static unsigned int *hpixels_buffer_vsync_off;
 static unsigned int *framebuffers[2];
-static unsigned int *framebuffer_lines[2][SCREEN_HEIGHT];
+static unsigned int **cur_framebuffer_lines;
 
 struct DMA_BUFFER_INFO {
   uintptr_t read_addr;
@@ -80,7 +87,7 @@ struct DMA_BUFFER_INFO {
   uint32_t  transfer_count;
   uint32_t  ctrl_trig;
 };
-static struct DMA_BUFFER_INFO dma_chain[2*V_FULL_FRAME+1];
+static struct DMA_BUFFER_INFO *dma_chain;
 static void *dma_restart_buffer[1];
 static uint dma_control_chan;
 static uint dma_data_chan;
@@ -113,12 +120,9 @@ static int init_pio(unsigned int pin_out_base)
   uint sm = pio_claim_unused_sm(pio, true);
   uint pio_dreq = pio_get_dreq(pio, sm, true);
 
-  // TODO: choose PIO clock divider based on the CPU clock and VGA
-  // pixel clock.  We're currently assuming that the CPU clock is
-  // 125MHz and VGA pixel clock is 12.5MHz (that is, 25MHz with pixel
-  // doubling), so we just set the divider to 10.
-  //uint f_clk_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
-  float clock_div = 10.f;
+  // choose PIO clock divider based on the CPU clock and VGA pixel clock
+  uint f_clk_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
+  float clock_div = ((float)f_clk_sys * 1000.f) / (float)PIX_CLOCK_MHZ;
 
   uint offset = pio_add_program(pio, &vga_program);
   vga_program_init(pio, sm, offset, pin_out_base, clock_div);
@@ -142,7 +146,7 @@ static int init_pio(unsigned int pin_out_base)
                         );
 
   // all blocks of dma_chain except last are set to trigger dma_data_chan to copy data to PIO
-  for (int i = 0; i < count_of(dma_chain)-1; i++) {
+  for (int i = 0; i < 2*V_FULL_FRAME; i++) {
     // src will be set by init_buffers() and vga_swap_buffers()
     set_dma_buffer_dst(&dma_chain[i],
                        &pio->txf[sm],                                              // write to PIO
@@ -155,8 +159,8 @@ static int init_pio(unsigned int pin_out_base)
   }
 
   // last block of dma_chain is set to trigger dma_data_chan to copy the dma_chain start address to the control chain (restarting it)
-  set_dma_buffer_src(&dma_chain[count_of(dma_chain)-1], dma_restart_buffer, 1);
-  set_dma_buffer_dst(&dma_chain[count_of(dma_chain)-1],
+  set_dma_buffer_src(&dma_chain[2*V_FULL_FRAME], dma_restart_buffer, 1);
+  set_dma_buffer_dst(&dma_chain[2*V_FULL_FRAME],
                      &dma_hw->ch[dma_control_chan].al3_read_addr_trig,           // write to dma_control_chan read address trigger
                      (DREQ_FORCE          << DMA_CH0_CTRL_TRIG_TREQ_SEL_LSB)  |  // as fast as possible
                      (dma_data_chan       << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB)  |  // chain to itself (don't chain)
@@ -178,8 +182,51 @@ static void clear_framebuffer(uint fb_num, uint8_t color)
   memset(framebuffers[fb_num], val, SCREEN_WIDTH*SCREEN_HEIGHT);
 }
 
+static int alloc_buffers(int num_framebuffers)
+{
+  for (int i = 0; i < num_framebuffers; i++) {
+    framebuffers[i] = NULL;
+  }
+  cur_framebuffer_lines    = NULL;
+  hblank_buffer_vsync_on   = NULL;
+  hblank_buffer_vsync_off  = NULL;
+  hpixels_buffer_vsync_on  = NULL;
+  hpixels_buffer_vsync_off = NULL;
+  dma_chain                = NULL;
+
+#define ALLOC(p, size)  p = malloc(size); if (! p) goto error
+  for (int i = 0; i < num_framebuffers; i++) {
+    ALLOC(framebuffers[i], SCREEN_WIDTH * SCREEN_HEIGHT);
+  }
+  ALLOC(cur_framebuffer_lines,    SCREEN_HEIGHT      * sizeof(unsigned int *));
+  ALLOC(hblank_buffer_vsync_on,   HBLANK_BUFFER_LEN  * sizeof(unsigned int));
+  ALLOC(hblank_buffer_vsync_off,  HBLANK_BUFFER_LEN  * sizeof(unsigned int));
+  ALLOC(hpixels_buffer_vsync_on,  HPIXELS_BUFFER_LEN * sizeof(unsigned int));
+  ALLOC(hpixels_buffer_vsync_off, HPIXELS_BUFFER_LEN * sizeof(unsigned int));
+  ALLOC(dma_chain,                (2*V_FULL_FRAME+1) * sizeof(struct DMA_BUFFER_INFO));
+#undef ALLOC
+
+  return 0;
+
+ error:
+  for (int i = 0; i < num_framebuffers; i++) {
+    free(framebuffers[i]);
+  }
+  free(cur_framebuffer_lines);
+  free(hblank_buffer_vsync_on);
+  free(hblank_buffer_vsync_off);
+  free(hpixels_buffer_vsync_on);
+  free(hpixels_buffer_vsync_off);
+  free(dma_chain);
+  return -1;
+}
+
 static int init_buffers(int num_framebuffers)
 {
+  if (alloc_buffers(num_framebuffers) < 0) {
+    return VGA_ERROR_ALLOC;
+  }
+
   uint8_t sync_h0v0 = (VSYNC_OFF<<7) | (HSYNC_OFF<<6);
   uint8_t sync_h1v0 = (VSYNC_OFF<<7) | (HSYNC_ON <<6);
   uint8_t sync_h0v1 = (VSYNC_ON <<7) | (HSYNC_OFF<<6);
@@ -203,17 +250,8 @@ static int init_buffers(int num_framebuffers)
   memset(hpixels_buffer_vsync_off, sync_h0v0, H_PIXELS);
 
   // framebuffers
-  for (int fb_num = 0; fb_num < num_framebuffers; fb_num++) {
-    framebuffers[fb_num] = malloc(SCREEN_WIDTH * SCREEN_HEIGHT);
-    if (! framebuffers[fb_num]) {
-      for (int i = 0; i < fb_num; i++)
-        free(framebuffers[i]);
-      return VGA_ERROR_ALLOC;
-    }
-    for (int line_num = 0; line_num < SCREEN_HEIGHT; line_num++) {
-      framebuffer_lines[fb_num][line_num] = &framebuffers[fb_num][line_num*HPIXELS_BUFFER_LEN];
-    }
-    clear_framebuffer(fb_num, 0);
+  for (int i = 0; i < num_framebuffers; i++) {
+    clear_framebuffer(i, 0);
   }
   
   // setup DMA chain buffers
@@ -230,7 +268,7 @@ static int init_buffers(int num_framebuffers)
     } else {
       // pixel data
       set_dma_buffer_src(buf++, hblank_buffer_vsync_off, HBLANK_BUFFER_LEN);
-      set_dma_buffer_src(buf++, framebuffer_lines[0][(i-V_SYNC_PULSE-V_BACK_PORCH)/V_DIV], HPIXELS_BUFFER_LEN);
+      set_dma_buffer_src(buf++, NULL, HPIXELS_BUFFER_LEN);  // set by vga_swap_buffers()
     }
   }
 
@@ -254,10 +292,14 @@ void vga_swap_buffers(bool wait_sync)
   // inject new framebuffer in DMA chain
   for (int i = 0; i < V_PIXELS; i++) {
     struct DMA_BUFFER_INFO *buf = &dma_chain[2*(V_SYNC_PULSE+V_BACK_PORCH+i) + 1];
-    set_dma_buffer_src(buf, framebuffer_lines[cur_framebuffer][i/V_DIV], HPIXELS_BUFFER_LEN);
+    set_dma_buffer_src(buf, &framebuffers[cur_framebuffer][i/V_DIV*HPIXELS_BUFFER_LEN], HPIXELS_BUFFER_LEN);
   }
+
+  // setup old framebuffer for drawing
   cur_framebuffer = !cur_framebuffer;
-  vga_screen.framebuffer = framebuffer_lines[cur_framebuffer];
+  for (int i = 0; i < SCREEN_HEIGHT; i++) {
+    cur_framebuffer_lines[i] = &framebuffers[cur_framebuffer][i*HPIXELS_BUFFER_LEN];
+  }
 }
 
 void vga_clear_screen(unsigned char color)
@@ -265,23 +307,27 @@ void vga_clear_screen(unsigned char color)
   clear_framebuffer(cur_framebuffer, color);
 }
 
-int vga_init(unsigned int pin_out_base)
+int vga_init(const struct VGA_MODE *mode, unsigned int pin_out_base)
 {
-  int err;
-  //bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
-  
-  err = init_pio(pin_out_base);
+  vga_mode = mode;
+
+  int err = init_buffers(2);
   if (err < 0) return err;
 
-  err = init_buffers(2);
+  err = init_pio(pin_out_base);
   if (err < 0) return err;
-  cur_framebuffer = 1; // start displaying framebuffer 0, drawing on 1
 
   vga_screen.width       = SCREEN_WIDTH;
   vga_screen.height      = SCREEN_HEIGHT;
   vga_screen.sync_bits   = SYNC_BITS;
-  vga_screen.framebuffer = framebuffer_lines[cur_framebuffer];
-  
+  vga_screen.framebuffer = cur_framebuffer_lines;
+
+  // setup first framebuffer
+  cur_framebuffer = 0;
+  vga_swap_buffers(false);
+
+  // start video output
+  //bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
   dma_channel_start(dma_control_chan);
   return 0;
 }

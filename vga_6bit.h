@@ -10,10 +10,28 @@
 extern "C" {
 #endif
 
+struct VGA_MODE {
+  unsigned int   pixel_clock_mhz;
+
+  unsigned short h_front_porch;
+  unsigned short h_sync_pulse;
+  unsigned short h_back_porch;
+  unsigned short h_pixels;
+
+  unsigned short v_front_porch;
+  unsigned short v_sync_pulse;
+  unsigned short v_back_porch;
+  unsigned short v_pixels;
+  unsigned char  v_div;
+
+  unsigned char h_polarity;
+  unsigned char v_polarity;
+};
+
 struct VGA_SCREEN {
   int width;
   int height;
-  unsigned int sync_bits;
+  unsigned char sync_bits;
   unsigned int **framebuffer;
 };
   
@@ -21,11 +39,15 @@ struct VGA_SCREEN {
 extern void (*volatile vga_core1_func)(void);
 #endif
 
-int vga_init(unsigned int pin_out_base);
+int vga_init(const struct VGA_MODE *mode, unsigned int pin_out_base);
 void vga_clear_screen(unsigned char color);
 void vga_swap_buffers(bool wait_sync);
 
 extern struct VGA_SCREEN vga_screen;
+
+extern const struct VGA_MODE vga_mode_320x240;
+extern const struct VGA_MODE vga_mode_320x200;
+extern const struct VGA_MODE vga_mode_320x175;
 
 #ifdef __cplusplus
 }

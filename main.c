@@ -169,7 +169,7 @@ int main(void)
   bi_decl_if_func_used(bi_1pin_with_name(VGA_PIN_BASE + 6, "H-Sync"));
   bi_decl_if_func_used(bi_1pin_with_name(VGA_PIN_BASE + 7, "V-Sync"));
   
-  if (vga_init(VGA_PIN_BASE) < 0) {
+  if (vga_init(&vga_mode_320x240, VGA_PIN_BASE) < 0) {
     printf("ERROR initializing VGA\n");
     fflush(stdout);
     return 1;
